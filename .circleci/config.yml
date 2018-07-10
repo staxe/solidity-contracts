@@ -1,0 +1,134 @@
+#  @copyright defined in solidity-contracts/LICENSE
+
+defaults: &defaults
+  working_directory: ~
+  docker:
+    - image: staxe/circleci-auto:node8-truffle
+
+version: 2
+
+jobs:
+
+  build:
+    <<: *defaults
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+          - v1-dependencies-{{ checksum "package.json" }}
+          # fallback to using the latest cache if no exact match is found
+          - v1-dependencies-
+      - run:
+          name: Installing NPM Modules
+          command: npm install
+      - save_cache:
+          paths:
+            - node_modules
+          key: v1-dependencies-{{ checksum "package.json" }}
+
+      - run:
+          name: Build contracts with truffle
+          command: truffle compile
+
+      - persist_to_workspace:
+          root: ./
+          paths:
+            - ./
+
+  test:
+    <<: *defaults
+    steps:
+      - attach_workspace:
+          at: ~/
+
+      - run:
+          name: Run test network and the tests
+          command: |
+            ganache-cli --mnemonic "candy maple cake sugar pudding cream honey rich smooth crumble sweet treat" --gasPrice 0 --port 9545 &
+            sleep 8 &&
+            truffle test --network local &&
+            cd; sed -i '/.*reporter/ s/spec/mocha-junit-reporter/g' truffle.js; truffle test --network local
+      
+      - store_test_results:
+          path: ~/
+      
+      - persist_to_workspace:
+          root: ./
+          paths:
+            - ./
+
+  deploy:
+    <<: *defaults
+    steps:
+      - attach_workspace:
+          at: ~/
+
+      - run:
+          name: Deploy to Rinkeby
+          command: DEPLOY_PRIVATE_KEY=$DEPLOY_PRIVATE_KEY truffle migrate --network rinkeby 2>&1 | tee deploy.info
+
+      - run:
+          name: Update CI Environment Variables of Staxe API build job, so we will have always the latest deployed version.
+          command: |
+            TOKEN_CONTRACT=$(grep StaxeToken: deploy.info | awk '{printf $2}')
+            PLATFORM_CONTRACT=$(grep StaxePlatform: deploy.info | awk '{printf $2}')
+            echo New Token Contract: ${TOKEN_CONTRACT}
+            echo New Platform Contract: ${PLATFORM_CONTRACT}
+            curl -X POST --header 'Content-Type: application/json' -d "{\"name\":\"PLATFORM_CONTRACT_ADDRESS\", \"value\":\"${PLATFORM_CONTRACT}\"}" $CI_API_URL
+            curl -X POST --header 'Content-Type: application/json' -d "{\"name\":\"TOKEN_CONTRACT_ADDRESS\", \"value\":\"${TOKEN_CONTRACT}\"}" $CI_API_URL
+
+      - store_artifacts:
+          path: ~/build/contracts
+
+  deploy-dev:
+    <<: *defaults
+    steps:
+      - attach_workspace:
+          at: ~/
+
+      - run:
+          name: Deploy to Rinkeby
+          command: DEPLOY_PRIVATE_KEY=$DEV_DEPLOY_PRIVATE_KEY truffle migrate --network rinkeby 2>&1 | tee deploy.info
+
+      - run:
+          name: Update CI Environment Variables of Staxe API build job, so we will have always the latest deployed version.
+          command: |
+            DEV_TOKEN_CONTRACT=$(grep StaxeToken: deploy.info | awk '{printf $2}')
+            DEV_PLATFORM_CONTRACT=$(grep StaxePlatform: deploy.info | awk '{printf $2}')
+            echo New Token Contract: ${DEV_TOKEN_CONTRACT}
+            echo New Platform Contract: ${DEV_PLATFORM_CONTRACT}
+            curl -X POST --header 'Content-Type: application/json' -d "{\"name\":\"DEV_PLATFORM_CONTRACT_ADDRESS\", \"value\":\"${DEV_PLATFORM_CONTRACT}\"}" $CI_API_URL
+            curl -X POST --header 'Content-Type: application/json' -d "{\"name\":\"DEV_TOKEN_CONTRACT_ADDRESS\", \"value\":\"${DEV_TOKEN_CONTRACT}\"}" $CI_API_URL
+
+      - store_artifacts:
+          path: ~/build/contracts
+    
+workflows:
+  version: 2
+  build_test:
+    jobs:
+      - build
+      - test:
+          requires:
+            - build
+      - deploy:
+          filters:
+            branches:
+              only:
+                - master
+          requires:
+            - test
+
+  develop_build:
+    jobs:
+      - build
+      - test:
+          requires:
+            - build
+      - deploy-dev:
+          filters:
+            branches:
+              only:
+                - develop
+          requires:
+            - test
